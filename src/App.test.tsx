@@ -1,0 +1,707 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, vi } from 'vitest';
+
+import App, {
+  applyDistancePreferences,
+  balanceEventsByCategory,
+  filterEvents,
+  isInDateRange,
+  defaultFilters,
+} from './App';
+import type { FilterOptions } from './App';
+import type { CmEvent } from './types';
+
+const makeEvent = (overrides: Partial<CmEvent> = {}): CmEvent => ({
+  id: 'evt-1',
+  title: 'Test Concert',
+  description: 'A great concert',
+  startDate: new Date('2026-07-15T19:30:00Z'),
+  endDate: null,
+  venue: 'Civic Centre',
+  address: '123 Main St',
+  category: 'live-music',
+  source: 'openactive',
+  sourceUrl: 'https://example.com/event/1',
+  latitude: 51.736,
+  longitude: 0.469,
+  imageUrl: null,
+  price: null,
+  promoter: null,
+  ...overrides,
+});
+
+function mockFetch(events: CmEvent[]) {
+  const raw = events.map(e => ({
+    ...e,
+    startDate: e.startDate.toISOString(),
+    endDate: e.endDate ? e.endDate.toISOString() : null,
+  }));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ events: raw }),
+    })
+  );
+}
+
+function mockFetchError(status = 500) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+    })
+  );
+}
+
+function mockGeolocation(latitude = 51.736, longitude = 0.469) {
+  const geolocation = {
+    getCurrentPosition: vi.fn(
+      (
+        success: PositionCallback,
+        _error?: PositionErrorCallback | null,
+        _options?: PositionOptions
+      ) => {
+        success({
+          coords: {
+            latitude,
+            longitude,
+            accuracy: 10,
+            altitude: null,
+            altitudeAccuracy: null,
+            heading: null,
+            speed: null,
+          },
+          timestamp: Date.now(),
+        } as GeolocationPosition);
+      }
+    ),
+  };
+
+  Object.defineProperty(navigator, 'geolocation', {
+    value: geolocation,
+    configurable: true,
+  });
+
+  return geolocation;
+}
+
+function filters(overrides: Partial<FilterOptions> = {}): FilterOptions {
+  return { ...defaultFilters, ...overrides };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  localStorage.clear();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  localStorage.clear();
+  Object.defineProperty(navigator, 'geolocation', { value: undefined, configurable: true });
+});
+
+describe('App', () => {
+  it('renders header with title and subtitle', async () => {
+    mockFetch([]);
+    render(<App />);
+    expect(screen.getByRole('heading', { name: /LdnOut/i })).toBeInTheDocument();
+    expect(screen.getByText(/London events/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows loading state initially', () => {
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => {})));
+    render(<App />);
+    expect(screen.getByRole('status')).toHaveTextContent(/loading/i);
+  });
+
+  it('renders events after successful fetch', async () => {
+    mockFetch([makeEvent({ title: 'Jazz Night' })]);
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /jazz night/i })).toBeInTheDocument();
+    });
+  });
+
+  it('shows error message when fetch fails', async () => {
+    mockFetchError(500);
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/failed to load events/i);
+    });
+  });
+
+  it('shows error message when fetch rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/network error/i);
+    });
+  });
+
+  it('hides loading state after fetch completes', async () => {
+    mockFetch([]);
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows event detail when an event is selected', async () => {
+    mockFetch([makeEvent({ title: 'Rock Festival', description: 'Amazing rock fest' })]);
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /rock festival/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /view details for rock festival/i }));
+    expect(screen.getByText(/more info \/ book tickets/i)).toBeInTheDocument();
+  });
+
+  it('navigates back from event detail to event list', async () => {
+    mockFetch([makeEvent({ title: 'Art Show' })]);
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /view details for art show/i })).toBeInTheDocument()
+    );
+    fireEvent.click(screen.getByRole('button', { name: /view details for art show/i }));
+    fireEvent.click(screen.getByRole('button', { name: /back to events/i }));
+    expect(screen.getByRole('heading', { name: /LdnOut/i })).toBeInTheDocument();
+  });
+
+  it('renders filter controls', async () => {
+    mockFetch([]);
+    render(<App />);
+    expect(screen.getByRole('searchbox')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /filter by date/i })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+  });
+
+  it('restores persisted category and date filters', async () => {
+    vi.setSystemTime(new Date('2026-03-04T10:00:00'));
+    localStorage.setItem(
+      'ldnout-filter-preferences',
+      JSON.stringify({
+        selectedCategories: ['sport'],
+        dateRange: 'today',
+        customDate: '',
+        selectedVenues: [],
+        selectedPromoters: [],
+      })
+    );
+    mockFetch([
+      makeEvent({
+        id: 'sport-today',
+        title: 'Community Run',
+        category: 'sport',
+        startDate: new Date('2026-03-04T13:00:00'),
+      }),
+      makeEvent({
+        id: 'music-today',
+        title: 'Jazz Night',
+        category: 'live-music',
+        startDate: new Date('2026-03-04T19:00:00'),
+      }),
+      makeEvent({
+        id: 'sport-future',
+        title: 'Future Run',
+        category: 'sport',
+        startDate: new Date('2026-03-06T13:00:00'),
+      }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /community run/i })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('heading', { name: /jazz night/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /future run/i })).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/sport/i)).toBeChecked();
+    expect(screen.getByLabelText(/today/i)).toBeChecked();
+  });
+
+  it('persists category and date filter changes', async () => {
+    mockFetch([makeEvent({ title: 'Community Run', category: 'sport' })]);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/sport/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText(/sport/i));
+    fireEvent.click(screen.getByLabelText(/today/i));
+
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem('ldnout-filter-preferences') ?? '{}');
+      expect(stored.selectedCategories).toEqual(['sport']);
+      expect(stored.dateRange).toBe('today');
+    });
+  });
+
+  it('balances categories in the default browsing list', async () => {
+    mockFetch([
+      makeEvent({ id: 'fitness-1', title: 'Fitness One', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-2', title: 'Fitness Two', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-3', title: 'Fitness Three', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-4', title: 'Fitness Four', category: 'fitness-class' }),
+      makeEvent({ id: 'music-1', title: 'Jazz Night', category: 'live-music' }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /jazz night/i })).toBeInTheDocument();
+    });
+
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map(heading => heading.textContent);
+    expect(headings.slice(0, 3)).toEqual(['Fitness One', 'Fitness Two', 'Jazz Night']);
+  });
+
+  it('keeps selected category results in their original order', async () => {
+    mockFetch([
+      makeEvent({ id: 'sport-1', title: 'Park Run', category: 'sport' }),
+      makeEvent({ id: 'sport-2', title: 'Track Meet', category: 'sport' }),
+      makeEvent({ id: 'music-1', title: 'Jazz Night', category: 'live-music' }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/sport/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText(/sport/i));
+
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map(heading => heading.textContent);
+    expect(headings).toEqual(['Park Run', 'Track Meet']);
+  });
+
+  it('shows distances and sorts nearest first after location is enabled', async () => {
+    mockGeolocation();
+    mockFetch([
+      makeEvent({
+        id: 'far',
+        title: 'Hyde Park Event',
+        latitude: 51.712,
+        longitude: 0.429,
+      }),
+      makeEvent({
+        id: 'near',
+        title: 'City Centre Event',
+        latitude: 51.736,
+        longitude: 0.469,
+      }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Hyde Park event/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /use my location/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/distances are shown/i)).toBeInTheDocument();
+    });
+
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map(heading => heading.textContent);
+    expect(headings).toEqual(['City Centre Event', 'Hyde Park Event']);
+    expect(screen.getAllByText('Nearby').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/2\.\d mi away/).length).toBeGreaterThan(0);
+  });
+
+  it('shows distances in the venue filter after location is enabled', async () => {
+    mockGeolocation();
+    mockFetch([
+      makeEvent({
+        id: 'near',
+        title: 'City Centre Event',
+        venue: 'Civic Centre',
+        latitude: 51.736,
+        longitude: 0.469,
+      }),
+      makeEvent({
+        id: 'far',
+        title: 'Hyde Park Event',
+        venue: 'Hyde Park',
+        latitude: 51.712,
+        longitude: 0.429,
+      }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Hyde Park event/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /use my location/i }));
+
+    await waitFor(() => {
+      const venueName = screen
+        .getAllByText('Hyde Park')
+        .find(element => element.classList.contains('list-filter__name'));
+      const venueLabel = venueName?.closest('label');
+      if (!venueLabel) throw new Error('Hyde Park venue label was not found');
+      expect(venueLabel).toHaveTextContent(/2\.\d mi away/);
+    });
+  });
+
+  it('filters events by selected distance radius', async () => {
+    mockGeolocation();
+    mockFetch([
+      makeEvent({
+        id: 'near',
+        title: 'City Centre Event',
+        latitude: 51.736,
+        longitude: 0.469,
+      }),
+      makeEvent({
+        id: 'far',
+        title: 'Hyde Park Event',
+        latitude: 51.712,
+        longitude: 0.429,
+      }),
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Hyde Park event/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /use my location/i }));
+    fireEvent.click(screen.getByLabelText('1 mi'));
+
+    expect(screen.getByRole('heading', { name: /city centre event/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Hyde Park event/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('filterEvents', () => {
+  const events: CmEvent[] = [
+    makeEvent({
+      id: '1',
+      title: 'Jazz Concert',
+      category: 'live-music',
+      description: 'Great jazz',
+    }),
+    makeEvent({ id: '2', title: 'Community Run', category: 'sport', description: 'Fun run' }),
+    makeEvent({ id: '3', title: 'Art Exhibition', category: 'other', description: 'Local art' }),
+  ];
+
+  it('returns all events when no filters applied', () => {
+    expect(filterEvents(events, filters())).toHaveLength(3);
+  });
+
+  it('filters by search query on title', () => {
+    const result = filterEvents(events, filters({ searchQuery: 'jazz' }));
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Jazz Concert');
+  });
+
+  it('filters by search query on description', () => {
+    const result = filterEvents(events, filters({ searchQuery: 'fun run' }));
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Community Run');
+  });
+
+  it('search is case-insensitive', () => {
+    expect(filterEvents(events, filters({ searchQuery: 'JAZZ' }))).toHaveLength(1);
+  });
+
+  it('filters by single category', () => {
+    const result = filterEvents(events, filters({ selectedCategories: ['sport'] }));
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Community Run');
+  });
+
+  it('filters by multiple categories', () => {
+    const result = filterEvents(events, filters({ selectedCategories: ['live-music', 'sport'] }));
+    expect(result).toHaveLength(2);
+  });
+
+  it('shows all events when selectedCategories is empty', () => {
+    expect(filterEvents(events, filters())).toHaveLength(3);
+  });
+
+  it('combines search and category filters', () => {
+    const result = filterEvents(
+      events,
+      filters({ searchQuery: 'jazz', selectedCategories: ['sport'] })
+    );
+    expect(result).toHaveLength(0);
+  });
+
+  it('filters by today date range', () => {
+    const soon = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now, still today
+    const todayEvent = makeEvent({ id: 'today', startDate: soon });
+    const futureEvent = makeEvent({
+      id: 'future',
+      startDate: new Date('2099-01-01T12:00:00Z'),
+    });
+    const result = filterEvents([todayEvent, futureEvent], filters({ dateRange: 'today' }));
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('today');
+  });
+
+  it('today excludes events that started today but have already ended', () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const completedEvent = makeEvent({
+      id: 'completed',
+      startDate: twoHoursAgo,
+      endDate: oneHourAgo,
+    });
+    const result = filterEvents([completedEvent], filters({ dateRange: 'today' }));
+    expect(result).toHaveLength(0);
+  });
+
+  it('today excludes events without an end time that started earlier today', () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const pastEvent = makeEvent({
+      id: 'past-start',
+      startDate: oneHourAgo,
+      endDate: null,
+    });
+    const result = filterEvents([pastEvent], filters({ dateRange: 'today' }));
+    expect(result).toHaveLength(0);
+  });
+
+  it('today includes spanning events that started before today but end today or later', () => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const spanningEvent = makeEvent({
+      id: 'spanning',
+      startDate: yesterday,
+      endDate: tomorrow,
+    });
+    const pastEvent = makeEvent({
+      id: 'past',
+      startDate: yesterday,
+      endDate: yesterday,
+    });
+    const result = filterEvents([spanningEvent, pastEvent], filters({ dateRange: 'today' }));
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('spanning');
+  });
+
+  it('date range all returns everything', () => {
+    const pastEvent = makeEvent({ id: 'past', startDate: new Date('2020-01-01T12:00:00Z') });
+    const futureEvent = makeEvent({ id: 'future', startDate: new Date('2099-01-01T12:00:00Z') });
+    expect(filterEvents([pastEvent, futureEvent], filters())).toHaveLength(2);
+  });
+
+  it('filters by venue', () => {
+    const eventsWithVenues = [
+      makeEvent({ id: '1', venue: 'Riverside' }),
+      makeEvent({ id: '2', venue: 'Civic Centre' }),
+      makeEvent({ id: '3', venue: 'Riverside' }),
+    ];
+    const result = filterEvents(eventsWithVenues, filters({ selectedVenues: ['Riverside'] }));
+    expect(result).toHaveLength(2);
+  });
+
+  it('filters by promoter', () => {
+    const eventsWithPromoters = [
+      makeEvent({ id: '1', promoter: 'Live Nation' }),
+      makeEvent({ id: '2', promoter: 'Local Promo' }),
+      makeEvent({ id: '3', promoter: null }),
+    ];
+    const result = filterEvents(
+      eventsWithPromoters,
+      filters({ selectedPromoters: ['Live Nation'] })
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('1');
+  });
+
+  it('excludes null promoter events when promoter filter is active', () => {
+    const eventsWithPromoters = [
+      makeEvent({ id: '1', promoter: null }),
+      makeEvent({ id: '2', promoter: 'Some Promoter' }),
+    ];
+    const result = filterEvents(
+      eventsWithPromoters,
+      filters({ selectedPromoters: ['Some Promoter'] })
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('2');
+  });
+
+  it('combines venue and category filters', () => {
+    const mixed = [
+      makeEvent({ id: '1', venue: 'Riverside', category: 'sport' }),
+      makeEvent({ id: '2', venue: 'Riverside', category: 'live-music' }),
+      makeEvent({ id: '3', venue: 'Civic Centre', category: 'sport' }),
+    ];
+    const result = filterEvents(
+      mixed,
+      filters({ selectedVenues: ['Riverside'], selectedCategories: ['sport'] })
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('1');
+  });
+});
+
+describe('balanceEventsByCategory', () => {
+  it('limits repeated categories while other categories are available', () => {
+    const result = balanceEventsByCategory([
+      makeEvent({ id: 'fitness-1', title: 'Fitness 1', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-2', title: 'Fitness 2', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-3', title: 'Fitness 3', category: 'fitness-class' }),
+      makeEvent({ id: 'music-1', title: 'Music 1', category: 'live-music' }),
+      makeEvent({ id: 'music-2', title: 'Music 2', category: 'live-music' }),
+    ]);
+
+    expect(result.map(event => event.id)).toEqual([
+      'fitness-1',
+      'fitness-2',
+      'music-1',
+      'fitness-3',
+      'music-2',
+    ]);
+  });
+
+  it('preserves event order when there is only one category', () => {
+    const source = [
+      makeEvent({ id: 'fitness-1', title: 'Fitness 1', category: 'fitness-class' }),
+      makeEvent({ id: 'fitness-2', title: 'Fitness 2', category: 'fitness-class' }),
+    ];
+
+    expect(balanceEventsByCategory(source)).toEqual(source);
+  });
+});
+
+describe('applyDistancePreferences', () => {
+  const userLocation = { latitude: 51.736, longitude: 0.469 };
+
+  it('sorts geocoded events by distance and places missing coordinates last', () => {
+    const result = applyDistancePreferences(
+      [
+        makeEvent({ id: 'far', latitude: 51.712, longitude: 0.429 }),
+        makeEvent({ id: 'missing', latitude: null, longitude: null }),
+        makeEvent({ id: 'near', latitude: 51.736, longitude: 0.469 }),
+      ],
+      userLocation,
+      null,
+      true
+    );
+
+    expect(result.map(event => event.id)).toEqual(['near', 'far', 'missing']);
+  });
+
+  it('filters to events within the selected radius', () => {
+    const result = applyDistancePreferences(
+      [
+        makeEvent({ id: 'near', latitude: 51.736, longitude: 0.469 }),
+        makeEvent({ id: 'far', latitude: 51.712, longitude: 0.429 }),
+        makeEvent({ id: 'missing', latitude: null, longitude: null }),
+      ],
+      userLocation,
+      1,
+      false
+    );
+
+    expect(result.map(event => event.id)).toEqual(['near']);
+  });
+});
+
+describe('isInDateRange', () => {
+  it('tomorrow returns events starting tomorrow', () => {
+    const now = new Date();
+    const tomorrowDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 14, 0);
+    const ev = makeEvent({ startDate: tomorrowDate });
+    expect(isInDateRange(ev, 'tomorrow', '')).toBe(true);
+  });
+
+  it('tomorrow excludes events starting today', () => {
+    const ev = makeEvent({ startDate: new Date() });
+    expect(isInDateRange(ev, 'tomorrow', '')).toBe(false);
+  });
+
+  it('tomorrow includes spanning events covering tomorrow', () => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dayAfterTomorrow = new Date(now);
+    dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
+    const ev = makeEvent({ startDate: yesterday, endDate: dayAfterTomorrow });
+    expect(isInDateRange(ev, 'tomorrow', '')).toBe(true);
+  });
+
+  it('custom date filters to specific date', () => {
+    const ev = makeEvent({ startDate: new Date('2026-06-15T14:00:00') });
+    expect(isInDateRange(ev, 'custom', '2026-06-15')).toBe(true);
+    expect(isInDateRange(ev, 'custom', '2026-06-16')).toBe(false);
+  });
+
+  it('custom date includes spanning events', () => {
+    const ev = makeEvent({
+      startDate: new Date('2026-06-14T10:00:00'),
+      endDate: new Date('2026-06-16T18:00:00'),
+    });
+    expect(isInDateRange(ev, 'custom', '2026-06-15')).toBe(true);
+  });
+
+  it('this-weekend includes Saturday events', () => {
+    // Set fake time to a Wednesday
+    vi.setSystemTime(new Date('2026-03-04T10:00:00')); // Wednesday
+    const saturday = new Date('2026-03-07T20:00:00');
+    const ev = makeEvent({ startDate: saturday });
+    expect(isInDateRange(ev, 'this-weekend', '')).toBe(true);
+  });
+
+  it('this-weekend excludes Thursday events', () => {
+    vi.setSystemTime(new Date('2026-03-04T10:00:00')); // Wednesday
+    const thursday = new Date('2026-03-05T14:00:00');
+    const ev = makeEvent({ startDate: thursday });
+    expect(isInDateRange(ev, 'this-weekend', '')).toBe(false);
+  });
+
+  it('this-week excludes events earlier this week that have already ended', () => {
+    vi.setSystemTime(new Date('2026-03-04T10:00:00')); // Wednesday
+    const monday = new Date('2026-03-02T20:00:00');
+    const ev = makeEvent({ startDate: monday });
+    expect(isInDateRange(ev, 'this-week', '')).toBe(false);
+  });
+
+  it('this-week includes events still running from earlier this week', () => {
+    vi.setSystemTime(new Date('2026-03-04T10:00:00')); // Wednesday
+    const monday = new Date('2026-03-02T20:00:00');
+    const thursday = new Date('2026-03-05T20:00:00');
+    const ev = makeEvent({ startDate: monday, endDate: thursday });
+    expect(isInDateRange(ev, 'this-week', '')).toBe(true);
+  });
+
+  it('this-month excludes events earlier this month that have already ended', () => {
+    vi.setSystemTime(new Date('2026-03-20T10:00:00'));
+    const earlierThisMonth = new Date('2026-03-04T20:00:00');
+    const ev = makeEvent({ startDate: earlierThisMonth });
+    expect(isInDateRange(ev, 'this-month', '')).toBe(false);
+  });
+
+  it('this-month includes future events later this month', () => {
+    vi.setSystemTime(new Date('2026-03-20T10:00:00'));
+    const laterThisMonth = new Date('2026-03-25T20:00:00');
+    const ev = makeEvent({ startDate: laterThisMonth });
+    expect(isInDateRange(ev, 'this-month', '')).toBe(true);
+  });
+});

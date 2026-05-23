@@ -1,0 +1,76 @@
+/* eslint-disable no-console */
+process.env.TZ = 'Europe/London';
+import 'dotenv/config';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { CmEvent } from './types.js';
+import { aggregateEvents } from './aggregator.js';
+import { enrichEvents } from './enrichment.js';
+import { generateEmbeddings } from './embeddings/generate.js';
+
+/** CmEvent with Date fields serialised as ISO strings for JSON consumption */
+export interface SerializedCmEvent extends Omit<CmEvent, 'startDate' | 'endDate'> {
+  startDate: string;
+  endDate: string | null;
+}
+
+export interface EventsJson {
+  fetchedAt: string;
+  totalEvents: number;
+  events: SerializedCmEvent[];
+}
+
+function serializeEvent(ev: CmEvent): SerializedCmEvent {
+  return {
+    ...ev,
+    startDate: ev.startDate.toISOString(),
+    endDate: ev.endDate ? ev.endDate.toISOString() : null,
+  };
+}
+
+const DEFAULT_OUTPUT = join(process.cwd(), 'public', 'events.json');
+
+export async function buildEventsJson(outputPath: string = DEFAULT_OUTPUT): Promise<EventsJson> {
+  const result = await aggregateEvents();
+  const events = await enrichEvents(result.events);
+
+  const output: EventsJson = {
+    fetchedAt: result.fetchedAt.toISOString(),
+    totalEvents: events.length,
+    events: events.map(serializeEvent),
+  };
+
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, JSON.stringify(output, null, 2), 'utf-8');
+
+  return output;
+}
+
+const DEFAULT_EMBEDDINGS_OUTPUT = join(process.cwd(), 'public', 'embeddings.json');
+
+export async function buildEmbeddingsJson(
+  events: EventsJson['events'],
+  outputPath: string = DEFAULT_EMBEDDINGS_OUTPUT
+): Promise<void> {
+  await mkdir(dirname(outputPath), { recursive: true });
+  await generateEmbeddings(events, outputPath);
+}
+
+async function main() {
+  console.log('Building public/events.json...');
+  const output = await buildEventsJson();
+  console.log(`Written ${output.totalEvents} events to public/events.json`);
+
+  console.log('Building public/embeddings.json...');
+  await buildEmbeddingsJson(output.events);
+}
+
+// Only run when this file is the entry point
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] === __filename) {
+  main().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}
