@@ -133,6 +133,11 @@ export const eventbriteFetcher: Fetcher = {
           throw err;
         }
 
+        if (/Human Verification|captcha|Cloudflare/i.test(html)) {
+          errors.push('Eventbrite: blocked by human verification');
+          break;
+        }
+
         // Extract window.__SERVER_DATA__ JSON by finding the assignment and the closing </script> tag
         const marker = 'window.__SERVER_DATA__ = ';
         const startIdx = html.indexOf(marker);
@@ -146,8 +151,12 @@ export const eventbriteFetcher: Fetcher = {
           if (pageNum === 1) errors.push('Eventbrite: no closing </script> after __SERVER_DATA__');
           break;
         }
-        // Trim trailing semicolons/whitespace before parsing
-        const jsonStr = html.slice(jsonStart, scriptEnd).replace(/;\s*$/, '');
+        // Trim any trailing JS after the object literal before parsing.
+        const jsonStr = html
+          .slice(jsonStart, scriptEnd)
+          .trim()
+          .replace(/;\s*$/, '')
+          .replace(/\s*window\.__SERVER_DATA_LOADED__\s*=.*$/s, '');
 
         const serverData = JSON.parse(jsonStr);
 

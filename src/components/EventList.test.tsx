@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import EventList from './EventList';
 import type { CmEvent } from '../types';
 
@@ -50,5 +50,20 @@ describe('EventList', () => {
     render(<EventList events={events} />);
     expect(screen.getByRole('heading', { name: /solo event/i })).toBeInTheDocument();
     expect(screen.getByRole('list', { name: /events/i }).querySelectorAll('li')).toHaveLength(1);
+  });
+
+  it('limits long lists and reveals more on request', () => {
+    const events = Array.from({ length: 55 }, (_, index) =>
+      makeEvent(String(index + 1), `Event ${index + 1}`)
+    );
+    render(<EventList events={events} />);
+
+    expect(screen.getByRole('list', { name: /events/i }).querySelectorAll('li')).toHaveLength(50);
+    expect(screen.queryByRole('heading', { name: 'Event 55' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /show 5 more/i }));
+
+    expect(screen.getByRole('list', { name: /events/i }).querySelectorAll('li')).toHaveLength(55);
+    expect(screen.getByRole('heading', { name: 'Event 55' })).toBeInTheDocument();
   });
 });

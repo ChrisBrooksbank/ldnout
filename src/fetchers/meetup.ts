@@ -7,10 +7,29 @@ import { makeEventId, normalisePrice, LONDON_LAT, LONDON_LNG } from '../utils.js
  * No API key required — public page.
  */
 
-// NOTE: Only fetches first page (~20-30 events). Meetup pagination requires GraphQL cursors
-// not available in SSR HTML. Full coverage needs Meetup API access.
-const SEARCH_URL =
-  'https://www.meetup.com/find/?source=EVENTS&location=gb--17--London&distance=tenMiles';
+const SEARCH_BASE = 'https://www.meetup.com/find/';
+
+const SEARCH_QUERIES: Array<Record<string, string>> = [
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'twentyFiveMiles' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', categoryId: '546' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'music' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'tech' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'art' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'business' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'social' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'walking' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'language' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'fitness' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'comedy' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'theatre' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'food' },
+  { source: 'EVENTS', location: 'gb--17--London', distance: 'tenMiles', keywords: 'startup' },
+];
+
+function searchUrl(query: Record<string, string>): string {
+  return `${SEARCH_BASE}?${new URLSearchParams(query)}`;
+}
 
 interface MeetupVenue {
   __typename?: string;
@@ -76,6 +95,7 @@ function resolveImageUrl(
 function parseEvent(apolloState: Record<string, unknown>, ev: MeetupEvent): CmEvent | null {
   // Skip online events
   if (ev.eventType === 'ONLINE') return null;
+  if (!ev.id || !ev.title || !ev.dateTime || !ev.eventUrl) return null;
 
   const startDate = new Date(ev.dateTime);
   if (isNaN(startDate.getTime())) return null;
@@ -124,60 +144,72 @@ export const meetupFetcher: Fetcher = {
     const start = Date.now();
     const errors: string[] = [];
     const allEvents: CmEvent[] = [];
+    const seen = new Set<string>();
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15000);
+      for (const query of SEARCH_QUERIES) {
+        const url = searchUrl(query);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
 
-      const res = await fetch(SEARCH_URL, {
-        headers: {
-          'User-Agent': 'LdnOut/0.1 (London Events Aggregator)',
-          Accept: 'text/html',
-        },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
+        let html = '';
+        try {
+          const res = await fetch(url, {
+            headers: {
+              'User-Agent': 'LdnOut/0.1 (London Events Aggregator)',
+              Accept: 'text/html',
+            },
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
 
-      if (!res.ok) {
-        errors.push(`Meetup: HTTP ${res.status}`);
-        return {
-          source: 'meetup',
-          events: [],
-          errors,
-          fetchedAt: new Date(),
-          durationMs: Date.now() - start,
-        };
-      }
+          if (!res.ok) {
+            errors.push(
+              `Meetup: HTTP ${res.status} for ${query.keywords ?? query.categoryId ?? 'all'}`
+            );
+            continue;
+          }
 
-      const html = await res.text();
+          html = await res.text();
+        } catch (err) {
+          clearTimeout(timer);
+          errors.push(
+            `Meetup ${query.keywords ?? query.categoryId ?? 'all'} fetch error: ${(err as Error).message}`
+          );
+          continue;
+        }
 
-      // Extract __NEXT_DATA__ JSON
-      const match = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
-      if (!match) {
-        errors.push('Meetup: no __NEXT_DATA__ found in HTML');
-        return {
-          source: 'meetup',
-          events: [],
-          errors,
-          fetchedAt: new Date(),
-          durationMs: Date.now() - start,
-        };
-      }
+        // Extract __NEXT_DATA__ JSON
+        const match = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
+        if (!match) {
+          errors.push(
+            `Meetup: no __NEXT_DATA__ found for ${query.keywords ?? query.categoryId ?? 'all'}`
+          );
+          continue;
+        }
 
-      const nextData = JSON.parse(match[1]);
+        const nextData = JSON.parse(match[1]);
 
-      // Apollo state is nested in page props
-      const apolloState: Record<string, unknown> =
-        nextData?.props?.pageProps?.__APOLLO_STATE__ ?? {};
+        // Apollo state is nested in page props
+        const apolloState: Record<string, unknown> =
+          nextData?.props?.pageProps?.__APOLLO_STATE__ ?? {};
 
-      // Find all Event entries in the Apollo cache
-      for (const [key, value] of Object.entries(apolloState)) {
-        if (!key.startsWith('Event:')) continue;
-        const ev = value as MeetupEvent;
-        if (ev.__typename !== 'Event') continue;
+        // Find all Event entries in the Apollo cache
+        for (const [key, value] of Object.entries(apolloState)) {
+          if (!key.startsWith('Event:')) continue;
+          const ev = value as MeetupEvent;
+          if (ev.__typename !== 'Event') continue;
 
-        const parsed = parseEvent(apolloState, ev);
-        if (parsed) allEvents.push(parsed);
+          try {
+            const parsed = parseEvent(apolloState, ev);
+            if (parsed && !seen.has(parsed.id)) {
+              seen.add(parsed.id);
+              allEvents.push(parsed);
+            }
+          } catch (err) {
+            errors.push(`Meetup event parse error (${ev.id ?? key}): ${(err as Error).message}`);
+          }
+        }
       }
 
       if (allEvents.length === 0 && errors.length === 0) {

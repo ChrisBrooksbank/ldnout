@@ -1,9 +1,14 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function gotoHome(page: Page) {
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('body')).toBeVisible();
+  await expect(page.getByRole('heading', { name: /ldnout/i })).toBeVisible();
+}
 
 test.describe('Core interactions', () => {
   test('page loads and is interactive', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await gotoHome(page);
 
     await expect(page).toHaveTitle(/.+/);
 
@@ -12,8 +17,7 @@ test.describe('Core interactions', () => {
   });
 
   test('navigation links work', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await gotoHome(page);
 
     const navLinks = page.locator('nav a, header a');
     const linkCount = await navLinks.count();
@@ -23,15 +27,13 @@ test.describe('Core interactions', () => {
       const href = await firstLink.getAttribute('href');
       if (href && !href.startsWith('http') && !href.startsWith('#')) {
         await firstLink.click();
-        await page.waitForLoadState('networkidle');
         await expect(page.locator('body')).toBeVisible();
       }
     }
   });
 
   test('buttons are clickable and respond', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await gotoHome(page);
 
     const buttons = page.locator('button:visible');
     const buttonCount = await buttons.count();
@@ -50,15 +52,13 @@ test.describe('Core interactions', () => {
       }
     });
 
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await gotoHome(page);
 
     expect(errors).toEqual([]);
   });
 
   test('no accessibility violations in tab order', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await gotoHome(page);
 
     await page.keyboard.press('Tab');
     const focusedElement = page.locator(':focus');

@@ -449,6 +449,31 @@ fieldset {
   font-size: 1rem;
 }
 
+.event-list__more {
+  display: block;
+  width: fit-content;
+  margin: 20px auto 0;
+  padding: 12px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color var(--transition),
+    border-color var(--transition),
+    transform var(--transition);
+}
+
+.event-list__more:hover,
+.event-list__more:focus-visible {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
 /* ----- Event Card ----- */
 .event-card {
   background: var(--surface);

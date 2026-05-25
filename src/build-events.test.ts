@@ -146,6 +146,44 @@ describe('buildEventsJson', () => {
     expect(result.totalEvents).toBe(2);
   });
 
+  it('includes source summary and acquisition warnings', async () => {
+    mockAggregateEvents.mockResolvedValue(
+      makeAggregateResult([
+        makeEvent({ id: '1', source: 'meetup' }),
+        makeEvent({ id: '2', source: 'meetup' }),
+      ])
+    );
+    const out = tempPath();
+    tempFiles.push(out);
+
+    const result = await buildEventsJson(out);
+
+    expect(result.sourceSummary).toEqual({ meetup: 2 });
+    expect(result.warnings).toContain('Only 2 events loaded; expected at least 100 for London.');
+    expect(result.warnings).toContain('Only 1 source contributed events; expected at least 2.');
+  });
+
+  it('warns when events look like Chelmsford carry-over', async () => {
+    mockAggregateEvents.mockResolvedValue(
+      makeAggregateResult([
+        makeEvent({
+          address: 'Market Road, Chelmsford, CM1 1GG',
+          latitude: 53.4808,
+          longitude: -2.2426,
+        }),
+      ])
+    );
+    const out = tempPath();
+    tempFiles.push(out);
+
+    const result = await buildEventsJson(out);
+
+    expect(result.warnings).toContain('1 events mention Chelmsford/Essex/CM postcodes.');
+    expect(result.warnings).toContain(
+      '1 geocoded events are more than 35 miles from central London.'
+    );
+  });
+
   it('writes valid JSON to the output path', async () => {
     mockAggregateEvents.mockResolvedValue(makeAggregateResult([makeEvent()]));
     const out = tempPath();
