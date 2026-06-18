@@ -1,6 +1,7 @@
 {
   "name": "ldnout",
   "version": "0.2.0",
+  "license": "MIT",
   "description": "London local events aggregator",
   "type": "module",
   "scripts": {
